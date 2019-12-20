@@ -4,6 +4,7 @@ import gym
 import matplotlib.pyplot as plt
 import torch
 
+#TODO  better evaluation; visualization of result; baseline
 
 #%%
 class PGPolicy(torch.nn.Module):
@@ -12,14 +13,20 @@ class PGPolicy(torch.nn.Module):
         self.num_act = num_act
         self.dim_obs = dim_obs
         self.hid_nn1 = torch.nn.Linear(dim_obs, num_hid)
-        self.hid_nn2 = torch.nn.Linear(num_hid, num_act)
+        self.hid_nn2 = torch.nn.Linear(num_hid, num_hid)
+        self.hid_nn3 = torch.nn.Linear(num_hid, num_act)
 
         return
 
     def forward(self, obs):
+        if obs.ndim == 1:
+            obs = obs.unsqueeze(0)
         out = self.hid_nn1(obs)
         out = torch.nn.functional.relu(out)
         out = self.hid_nn2(out)
+        out = torch.nn.functional.relu(out)
+        out = self.hid_nn3(out)
+        out = torch.nn.functional.log_softmax(out, dim=1)
         return out
 
     def select_act(self, obs):
@@ -30,31 +37,99 @@ class PGPolicy(torch.nn.Module):
         obs = obs.reshape(-1, self.dim_obs)
         obs = torch.FloatTensor(obs)
         with torch.no_grad():
-            output = self.forward(obs)
-        act = torch.argmax(output, axis=1, keepdim=True)
+            log_prob = self.forward(obs)
+            sampler = torch.distributions.Categorical(logits=log_prob)
+            act = sampler.sample()
+        # act = torch.argmax(output, axis=1, keepdim=True)
         act = act.numpy()
         # act = act.reshape(-1) # for box action, act must be array
-        act = act.item() if act.shape == (1, 1) else act
+
+        act = act.item() if act.size == 1 else act
         return act
 
 
 #%%
 class PGMethod:
-    def __init__(self, policy, env, lr=1e-3):
+    def __init__(self, policy, env, lr=1e-2, discount=None, use_baseline=False):
         self.policy = policy
         self.env = env
         self.lr = lr
-        self.criterion = torch.nn.CrossEntropyLoss()
-        self.optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+        self.discount = discount
+        self.use_baseline = use_baseline
+
+        self.optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+        self.record_rwd = []
         return
 
-    def train(self):
+    def record_and_report(self, records):
+        for _record in records:
+            rwds_list = _record["r"].sum()
+        self.record_rwd.append(np.mean(rwds_list))
+        return
 
+    def train(self, training_epoch=100, sampling_epoch=5):
+        for i in range(training_epoch):
+            records = self.rollout_n(sampling_epoch)
+            total_loss = 0
+
+            rwd_sum_reco = []
+
+            if self.use_baseline:
+                baseline = [item["r"].sum() for item in records]
+                baseline = np.mean(baseline)
+            else:
+                baseline = 0
+
+            for _reco in records:
+                s, a, r, R_tao = _reco["s"], _reco["a"], _reco["r"], _reco["R_tao"],
+                s = torch.FloatTensor(s)
+                a = torch.LongTensor(a)
+                R_tao = torch.FloatTensor(R_tao - baseline)
+
+                log_prob = self.policy(s)
+                log_prob = torch.gather(log_prob, dim=1, index=a.view(-1, 1))
+                # loss = self.criterion(predict, a)
+
+                loss = -log_prob * R_tao
+                loss = loss.sum()
+                total_loss += loss
+
+                rwd_sum_reco.append(r.sum())
+
+            print(f"epoch {i}, sampled {len(records)},"
+                  f" total reward mean {np.mean(rwd_sum_reco)}, "
+                  f"std {np.std(rwd_sum_reco)}")
+
+            total_loss /= len(records)
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            self.optimizer.step()
+
+            self.record_and_report(records)
+
+        plt.plot(self.record_rwd)
+        plt.show()
         return
 
     def rollout_reward(self, rwd):
-        rwd = np.cumsum(rwd)
-        return rwd
+        if self.discount is None:
+            return self.rollout_reward_no_discount(rwd)
+        else:
+            return self.rollout_reward_discount(rwd)
+
+    def rollout_reward_no_discount(self, rwd):
+        rwd = np.cumsum(rwd[::-1])[::-1]
+        return rwd.copy()  #copy() is important
+
+    def rollout_reward_discount(self, rwd):
+        rwd = np.flip(rwd)
+        R_tao = np.zeros_like(rwd)
+        cache = 0.
+        for i, _rwd in enumerate(rwd):
+            cache = _rwd + self.discount * cache
+            R_tao[i] = cache
+        R_tao = np.flip(R_tao)
+        return R_tao.copy()
 
     def rollout_n(self, n_epi):
         total_record = []
@@ -81,18 +156,19 @@ class PGMethod:
 #%%
 
 NUM_HID = 64
+DISCOUNT_FACTOR = 0.9999
+USE_BASELINE = False
+torch.manual_seed(0)
+np.random.seed(0)
 
 env = gym.make("CartPole-v1")
+env.seed(0)
+
 dim_obs = env.observation_space.sample().shape[0]
 num_act = env.action_space.n
 
 policy = PGPolicy(dim_obs, num_act, NUM_HID)
-pg_method = PGMethod(policy, env)
+pg_method = PGMethod(policy, env, discount=DISCOUNT_FACTOR)
 
 #%%
-s = env.reset()
-done = False
-while not done:
-    act = policy.select_act(s)
-    s, r, done,  _ = env.step(act)
-    print(f"s {s} a {act}  r {r}")
+pg_method.train(training_epoch=1000, sampling_epoch=15)
