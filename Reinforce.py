@@ -3,8 +3,12 @@ import numpy as np
 import gym
 import matplotlib.pyplot as plt
 import torch
+import os
+import shutil
+from torch.utils.tensorboard import SummaryWriter
+import time
 
-#TODO  better evaluation; visualization of result; baseline
+#TODO  better evaluation; test file; debugging, stop criterion
 
 #%%
 class PGPolicy(torch.nn.Module):
@@ -40,7 +44,7 @@ class PGPolicy(torch.nn.Module):
             log_prob = self.forward(obs)
             sampler = torch.distributions.Categorical(logits=log_prob)
             act = sampler.sample()
-        # act = torch.argmax(output, axis=1, keepdim=True)
+
         act = act.numpy()
         # act = act.reshape(-1) # for box action, act must be array
 
@@ -50,7 +54,8 @@ class PGPolicy(torch.nn.Module):
 
 #%%
 class PGMethod:
-    def __init__(self, policy, env, lr=1e-2, discount=None, use_baseline=False):
+    def __init__(self, policy, env, lr=1e-2, discount=None,
+                 use_baseline=False, log_folder="./runs/"):
         self.policy = policy
         self.env = env
         self.lr = lr
@@ -59,6 +64,9 @@ class PGMethod:
 
         self.optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
         self.record_rwd = []
+        self.log_folder = log_folder
+        self.writer = SummaryWriter(self.log_folder+"/PG_"
+                                    +time.strftime("%b%d_%H_%M", time.localtime()))
         return
 
     def record_and_report(self, records):
@@ -68,6 +76,8 @@ class PGMethod:
         return
 
     def train(self, training_epoch=100, sampling_epoch=5):
+        last_best = 400
+
         for i in range(training_epoch):
             records = self.rollout_n(sampling_epoch)
             total_loss = 0
@@ -88,8 +98,8 @@ class PGMethod:
 
                 log_prob = self.policy(s)
                 log_prob = torch.gather(log_prob, dim=1, index=a.view(-1, 1))
-                # loss = self.criterion(predict, a)
 
+                log_prob = log_prob.view(-1)
                 loss = -log_prob * R_tao
                 loss = loss.sum()
                 total_loss += loss
@@ -106,7 +116,24 @@ class PGMethod:
             self.optimizer.step()
 
             self.record_and_report(records)
+            self.writer.add_scalar("loss", total_loss, i)
+            self.writer.add_scalar("reward", np.mean(rwd_sum_reco), i)
+            self.writer.add_histogram("reward_errbar", np.array(rwd_sum_reco), i)
+            self.writer.flush()
 
+            if np.mean(rwd_sum_reco) > last_best:
+                eval_records = self.rollout_n(60)
+                eval_rwd_sum = [np.sum(_record["r"]) for _record in eval_records]
+
+                if np.mean(eval_rwd_sum) > last_best:
+                    last_best = np.mean(eval_rwd_sum)
+
+                print(f"epoch {i} evaluation: {np.mean(eval_rwd_sum)} the best {last_best}")
+                if last_best == 500:
+                    print("finish training")
+                    break
+
+        self.writer.close()
         plt.plot(self.record_rwd)
         plt.show()
         return
@@ -157,7 +184,11 @@ class PGMethod:
 
 NUM_HID = 64
 DISCOUNT_FACTOR = 0.9999
-USE_BASELINE = False
+USE_BASELINE = True
+# LOG_FOLDER = "/tmp/pg_log/"
+LOG_FOLDER = "./vpg/log"
+
+
 torch.manual_seed(0)
 np.random.seed(0)
 
@@ -168,7 +199,7 @@ dim_obs = env.observation_space.sample().shape[0]
 num_act = env.action_space.n
 
 policy = PGPolicy(dim_obs, num_act, NUM_HID)
-pg_method = PGMethod(policy, env, discount=DISCOUNT_FACTOR)
+pg_method = PGMethod(policy, env, use_baseline=USE_BASELINE, discount=DISCOUNT_FACTOR, log_folder=LOG_FOLDER)
 
 #%%
-pg_method.train(training_epoch=1000, sampling_epoch=15)
+pg_method.train(training_epoch=8000, sampling_epoch=15)
