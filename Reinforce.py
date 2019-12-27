@@ -77,6 +77,7 @@ class PGMethod:
 
     def train(self, training_epoch=100, sampling_epoch=5):
         last_best = 400
+        self.writer.add_graph(self.policy, torch.rand(1, 4))
 
         for i in range(training_epoch):
             records = self.rollout_n(sampling_epoch)

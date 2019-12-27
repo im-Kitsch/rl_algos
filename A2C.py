@@ -83,6 +83,7 @@ class A2C:
 
     def train(self, training_epoch=100, sampling_epoch=5):
         last_best = 400
+        self.writer.add_graph(self.policy, input_to_model=torch.rand(2, 4))
 
         for i in range(training_epoch):
             records = self.rollout_n(sampling_epoch)
